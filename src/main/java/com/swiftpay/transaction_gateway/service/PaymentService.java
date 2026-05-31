@@ -17,6 +17,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class PaymentService {
@@ -90,7 +92,12 @@ public class PaymentService {
         transactionRepository.save(transaction);
         redisTemplate.opsForValue().set(redisKey, "PENDING", Duration.ofHours(24));
 
-        paymentEventProducer.publishPaymentInitiated(transaction);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                paymentEventProducer.publishPaymentInitiated(transaction.getTransactionId());
+            }
+        });
 
         logger.info("Payment queued for ledger processing transactionId={}", transactionId);
         return transaction;

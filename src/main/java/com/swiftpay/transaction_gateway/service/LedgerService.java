@@ -33,13 +33,13 @@ public class LedgerService {
     }
 
     @Transactional
-    public void handlePaymentInitiated(Transaction event) {
+    public void handlePaymentInitiated(String transactionId) {
         Transaction transaction = transactionRepository
-                .findByTransactionId(event.getTransactionId())
+                .findByTransactionId(transactionId)
                 .orElse(null);
 
         if (transaction == null) {
-            logger.warn("LedgerService skipped unknown transactionId={}", event.getTransactionId());
+            logger.warn("LedgerService skipped unknown transactionId={}", transactionId);
             return;
         }
 
@@ -51,10 +51,10 @@ public class LedgerService {
         }
 
         Account sender = accountRepository
-                .findById(event.getSenderId())
+                .findById(transaction.getSenderId())
                 .orElse(null);
         Account receiver = accountRepository
-                .findById(event.getReceiverId())
+                .findById(transaction.getReceiverId())
                 .orElse(null);
 
         if (sender == null || receiver == null) {
@@ -62,13 +62,13 @@ public class LedgerService {
             return;
         }
 
-        if (sender.getBalance() == null || sender.getBalance() < event.getAmount()) {
+        if (sender.getBalance() == null || sender.getBalance() < transaction.getAmount()) {
             completeTransactionWithFailure(transaction, "Insufficient funds");
             return;
         }
 
-        sender.setBalance(sender.getBalance() - event.getAmount());
-        receiver.setBalance(receiver.getBalance() + event.getAmount());
+        sender.setBalance(sender.getBalance() - transaction.getAmount());
+        receiver.setBalance(receiver.getBalance() + transaction.getAmount());
 
         accountRepository.save(sender);
         accountRepository.save(receiver);
@@ -76,13 +76,7 @@ public class LedgerService {
         transaction.setStatus("COMPLETED");
         transactionRepository.save(transaction);
 
-        Map<String, Object> statusPayload = new HashMap<>();
-        statusPayload.put("transactionId", transaction.getTransactionId());
-        statusPayload.put("status", "COMPLETED");
-        statusPayload.put("reason", "Payment completed successfully");
-        statusPayload.put("completedAt", LocalDateTime.now().toString());
-
-        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), statusPayload);
+        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), "COMPLETED");
 
         logger.info("LedgerService completed payment for transactionId={}", transaction.getTransactionId());
     }
@@ -91,13 +85,7 @@ public class LedgerService {
         transaction.setStatus("FAILED");
         transactionRepository.save(transaction);
 
-        Map<String, Object> statusPayload = new HashMap<>();
-        statusPayload.put("transactionId", transaction.getTransactionId());
-        statusPayload.put("status", "FAILED");
-        statusPayload.put("reason", reason);
-        statusPayload.put("completedAt", LocalDateTime.now().toString());
-
-        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), statusPayload);
+        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), "FAILED");
 
         logger.warn("LedgerService failed payment transactionId={} reason= {}",
                 transaction.getTransactionId(),

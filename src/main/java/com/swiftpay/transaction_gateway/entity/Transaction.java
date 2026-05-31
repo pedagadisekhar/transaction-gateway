@@ -24,7 +24,7 @@ public class Transaction {
     private String status;
 
     private LocalDateTime createdAt;
-    
+
     @Column(name = "transaction_id", unique = true)
     private String transactionId;
 
@@ -86,13 +86,12 @@ public class Transaction {
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
     }
-    
+
     public String getTransactionId() {
-    	return transactionId;
+        return transactionId;
     }
-    
+
     public void setTransactionId(String transactionId) {
-    	 this.transactionId=transactionId;
+        this.transactionId = transactionId;
     }
-    
 }
