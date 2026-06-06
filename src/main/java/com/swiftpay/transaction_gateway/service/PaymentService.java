@@ -8,7 +8,6 @@ import java.util.UUID;
 
 import com.swiftpay.transaction_gateway.entity.Account;
 import com.swiftpay.transaction_gateway.entity.Transaction;
-import com.swiftpay.transaction_gateway.kafka.PaymentEventProducer;
 import com.swiftpay.transaction_gateway.repositary.AccountRepository;
 import com.swiftpay.transaction_gateway.repositary.TransactionRepository;
 
@@ -16,9 +15,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class PaymentService {
@@ -29,16 +25,16 @@ public class PaymentService {
     private final AccountRepository accountRepository;
     private final TransactionRepository transactionRepository;
     private final RedisTemplate<String, String> redisTemplate;
-    private final PaymentEventProducer paymentEventProducer;
+    private final PaymentPersistenceService paymentPersistenceService;
 
     public PaymentService(AccountRepository accountRepository,
                           TransactionRepository transactionRepository,
                           RedisTemplate<String, String> redisTemplate,
-                          PaymentEventProducer paymentEventProducer) {
+                          PaymentPersistenceService paymentPersistenceService) {
         this.accountRepository = accountRepository;
         this.transactionRepository = transactionRepository;
         this.redisTemplate = redisTemplate;
-        this.paymentEventProducer = paymentEventProducer;
+        this.paymentPersistenceService = paymentPersistenceService;
     }
 
     public List<Account> getAllAccounts() {
@@ -49,14 +45,14 @@ public class PaymentService {
         return transactionRepository.findBySenderIdOrReceiverId(userId, userId);
     }
 
-    @Transactional
     public Transaction createPayment(Transaction request) {
         String transactionId = Optional.ofNullable(request.getTransactionId())
                 .filter(id -> !id.isBlank())
                 .orElse(UUID.randomUUID().toString());
 
         String redisKey = PAYMENT_IDEMPOTENCY_PREFIX + transactionId;
-        if (Boolean.TRUE.equals(redisTemplate.hasKey(redisKey))) {
+        Boolean created = redisTemplate.opsForValue().setIfAbsent(redisKey, "PENDING", Duration.ofHours(24));
+        if (Boolean.FALSE.equals(created)) {
             logger.warn("Duplicate payment request for transactionId={}", transactionId);
             Transaction duplicateResponse = new Transaction();
             duplicateResponse.setTransactionId(transactionId);
@@ -65,42 +61,12 @@ public class PaymentService {
             return duplicateResponse;
         }
 
-        Account sender = accountRepository.findById(request.getSenderId()).orElse(null);
-        if (sender != null && sender.getBalance() != null && sender.getBalance() < request.getAmount()) {
-            logger.warn("Sender has insufficient balance for transactionId={}", transactionId);
-            Transaction failedResponse = new Transaction();
-            failedResponse.setTransactionId(transactionId);
-            failedResponse.setStatus("FAILED");
-            failedResponse.setSenderId(request.getSenderId());
-            failedResponse.setReceiverId(request.getReceiverId());
-            failedResponse.setAmount(request.getAmount());
-            failedResponse.setCurrency(request.getCurrency());
-            failedResponse.setCreatedAt(LocalDateTime.now());
-            return failedResponse;
+        try {
+            return paymentPersistenceService.savePendingPayment(request, transactionId);
+        } catch (Exception ex) {
+            redisTemplate.delete(redisKey);
+            throw ex;
         }
-
-        Transaction transaction = new Transaction();
-        transaction.setId(UUID.randomUUID().toString());
-        transaction.setTransactionId(transactionId);
-        transaction.setSenderId(request.getSenderId());
-        transaction.setReceiverId(request.getReceiverId());
-        transaction.setAmount(request.getAmount());
-        transaction.setCurrency(request.getCurrency());
-        transaction.setStatus("PENDING");
-        transaction.setCreatedAt(LocalDateTime.now());
-
-        transactionRepository.save(transaction);
-        redisTemplate.opsForValue().set(redisKey, "PENDING", Duration.ofHours(24));
-
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                paymentEventProducer.publishPaymentInitiated(transaction.getTransactionId());
-            }
-        });
-
-        logger.info("Payment queued for ledger processing transactionId={}", transactionId);
-        return transaction;
     }
 
     public Transaction getTransactionById(String transactionId) {

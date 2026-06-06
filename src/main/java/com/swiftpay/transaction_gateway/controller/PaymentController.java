@@ -32,7 +32,7 @@ public class PaymentController {
 
     @PostMapping("/v1/payments")
     public Transaction createPayment(@RequestBody Transaction transaction) {
-        logger.info("Payment request received for senderId={}", transaction.getSenderId());
+        logger.debug("Payment request received for senderId={}", transaction.getSenderId());
         return paymentService.createPayment(transaction);
     }
 

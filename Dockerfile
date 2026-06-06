@@ -3,33 +3,29 @@ FROM eclipse-temurin:21-jdk AS builder
 
 WORKDIR /build
 
-# Copy Maven wrapper and pom.xml
 COPY mvnw pom.xml ./
 COPY .mvn .mvn
 
-# Download dependencies
 RUN ./mvnw dependency:resolve -DskipTests
 
-# Copy source code
 COPY src src
 
-# Build application
 RUN ./mvnw package -DskipTests
 
-# Runtime stage
 FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 
-# Copy built JAR from builder stage
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /build/target/*.jar app.jar
 
-# Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD java -cp app.jar org.springframework.boot.loader.JarLauncher || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
 
-# Run application
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENV JAVA_OPTS="-Xms512m -Xmx1536m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+ParallelRefProcEnabled"
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

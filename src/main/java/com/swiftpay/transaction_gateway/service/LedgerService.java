@@ -1,8 +1,9 @@
 package com.swiftpay.transaction_gateway.service;
 
-import java.time.LocalDateTime;
-import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.swiftpay.transaction_gateway.entity.Account;
 import com.swiftpay.transaction_gateway.entity.Transaction;
@@ -14,6 +15,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class LedgerService {
@@ -44,18 +47,23 @@ public class LedgerService {
         }
 
         if (!"PENDING".equalsIgnoreCase(transaction.getStatus())) {
-            logger.info("LedgerService skipped transactionId={} with status={}",
+            logger.debug("LedgerService skipped transactionId={} with status={}",
                     transaction.getTransactionId(),
                     transaction.getStatus());
             return;
         }
 
-        Account sender = accountRepository
-                .findById(transaction.getSenderId())
-                .orElse(null);
-        Account receiver = accountRepository
-                .findById(transaction.getReceiverId())
-                .orElse(null);
+        String senderId = transaction.getSenderId();
+        String receiverId = transaction.getReceiverId();
+        List<String> orderedIds = senderId.compareTo(receiverId) <= 0
+                ? List.of(senderId, receiverId)
+                : List.of(receiverId, senderId);
+
+        Map<String, Account> accountsById = accountRepository.findAllByIdInForUpdate(orderedIds).stream()
+                .collect(Collectors.toMap(Account::getId, Function.identity()));
+
+        Account sender = accountsById.get(senderId);
+        Account receiver = accountsById.get(receiverId);
 
         if (sender == null || receiver == null) {
             completeTransactionWithFailure(transaction, "Sender or receiver account not found");
@@ -76,19 +84,28 @@ public class LedgerService {
         transaction.setStatus("COMPLETED");
         transactionRepository.save(transaction);
 
-        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), "COMPLETED");
+        publishStatusAfterCommit(transaction.getTransactionId(), "COMPLETED");
 
-        logger.info("LedgerService completed payment for transactionId={}", transaction.getTransactionId());
+        logger.debug("LedgerService completed payment for transactionId={}", transaction.getTransactionId());
     }
 
     private void completeTransactionWithFailure(Transaction transaction, String reason) {
         transaction.setStatus("FAILED");
         transactionRepository.save(transaction);
 
-        paymentEventProducer.publishPaymentStatus(transaction.getTransactionId(), "FAILED");
+        publishStatusAfterCommit(transaction.getTransactionId(), "FAILED");
 
-        logger.warn("LedgerService failed payment transactionId={} reason= {}",
+        logger.warn("LedgerService failed payment transactionId={} reason={}",
                 transaction.getTransactionId(),
                 reason);
+    }
+
+    private void publishStatusAfterCommit(String transactionId, String status) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                paymentEventProducer.publishPaymentStatus(transactionId, status);
+            }
+        });
     }
 }
